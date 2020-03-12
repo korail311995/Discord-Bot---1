@@ -1,0 +1,179 @@
+import org.apache.tools.ant.filters.ReplaceTokens
+
+buildscript {
+    ext {
+        //@formatter:off
+
+        //plugin versions
+        gradleGitVersion        = '2.+'
+        springBootVersion       = '[2.2.1.RELEASE, 2.3['
+        sonarqubeVersion        = '2.+'
+        versionsVersion         = '0.+'
+
+        jdaVersion              = '[4.0.0_46, 4.1['
+        sentryVersion           = '[1.7.27, 2.0['
+        okhttpVersion           = '[3.14.3, 4.0['
+        annotationsVersion      = '[0.0.2, 0.1['
+        emojiVersion            = '[5.1.1, 6.0['
+        guavaVersion            = '[28.1-jre, 29['
+
+        //@formatter:on
+    }
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+    dependencies {
+        classpath "gradle.plugin.com.gorylenko.gradle-git-properties:gradle-git-properties:${gradleGitVersion}"
+        classpath "org.springframework.boot:spring-boot-gradle-plugin:${springBootVersion}"
+        classpath "org.sonarsource.scanner.gradle:sonarqube-gradle-plugin:${sonarqubeVersion}"
+        classpath "com.github.ben-manes:gradle-versions-plugin:${versionsVersion}"
+    }
+
+    configurations.classpath {
+        resolutionStrategy.activateDependencyLocking()
+    }
+}
+
+apply plugin: 'idea'
+apply plugin: 'java'
+apply plugin: 'com.gorylenko.gradle-git-properties'
+apply plugin: 'org.springframework.boot'
+apply plugin: 'jacoco'
+apply plugin: 'org.sonarqube'
+apply plugin: 'com.github.ben-manes.versions'
+
+group 'space.npstr.baymax'
+version '0.0.1-SNAPSHOT'
+
+sourceCompatibility = targetCompatibility = JavaVersion.VERSION_11
+
+repositories {
+    jcenter()
+    mavenCentral()
+    maven { url 'https://jitpack.io' }
+}
+
+configurations {
+    // fucks with spring boot jar, we don't need it anyways
+    compile.exclude module: 'opus-java'
+}
+
+dependencies {
+    implementation platform("org.springframework.boot:spring-boot-dependencies:$springBootVersion")
+    testRuntime platform("org.springframework.boot:spring-boot-dependencies:$springBootVersion")
+
+    implementation "net.dv8tion:JDA:$jdaVersion"
+    implementation "ch.qos.logback:logback-classic"
+    implementation "io.sentry:sentry-logback:$sentryVersion"
+    implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"
+    implementation "space.npstr:annotations:$annotationsVersion"
+    implementation "org.yaml:snakeyaml"
+    implementation "com.github.ben-manes.caffeine:caffeine"
+    implementation "com.vdurmont:emoji-java:$emojiVersion"
+    implementation "com.google.guava:guava:$guavaVersion"
+    implementation "org.xerial:sqlite-jdbc"
+    implementation "org.flywaydb:flyway-core"
+
+    //spring
+    implementation "org.springframework.boot:spring-boot-starter"
+
+    //testing
+    testImplementation "org.junit.jupiter:junit-jupiter-api"
+    testRuntime "org.junit.jupiter:junit-jupiter-engine"
+}
+
+dependencyUpdates.resolutionStrategy {
+    componentSelection properReleasesOnly()
+}
+
+dependencyLocking {
+    lockAllConfigurations()
+}
+
+// ./gradlew resolveAndLockAll --write-locks
+task resolveAndLockAll {
+    doFirst {
+        assert gradle.startParameter.writeDependencyLocks
+    }
+    doLast {
+        configurations.all {
+            resolutionStrategy {
+                componentSelection properReleasesOnly()
+            }
+        }
+        configurations
+                .findAll { it.canBeResolved }
+                .each { it.resolve() }
+    }
+}
+
+tasks.withType(JavaCompile) {
+    dependsOn(clean, processResources)
+    options.encoding = 'UTF-8'
+    options.compilerArgs << "-Xlint:unchecked" << "-Xlint:deprecation"
+}
+
+bootRun {
+    //compiling tests during bootRun increases the likelyhood of catching broken tests locally instead of on the CI
+    dependsOn compileTestJava
+
+    //pass in custom jvm args
+    // source: https://stackoverflow.com/a/25079415
+    // example: ./gradlew bootRun -PjvmArgs="--illegal-access=debug -Dwhatever=value"
+    if (project.hasProperty('jvmArgs')) {
+        //noinspection GroovyAssignabilityCheck
+        jvmArgs project.jvmArgs.split('\\s+')
+    }
+}
+
+bootJar {
+    archiveFileName.set("baymax.jar")
+    doLast {
+        copy {
+            from 'build/libs/baymax.jar'
+            into '.'
+        }
+    }
+}
+
+test {
+    useJUnitPlatform()
+    jacoco {
+        includes['space.npstr.baymax.*']
+    }
+}
+
+sonarqube {
+    properties {
+        property 'sonar.inclusions', 'src/main/java/space/npstr/baymax/**/*'
+    }
+}
+
+processResources {
+    //inject values into app.properties
+    filesMatching("**/app.properties") {
+        filter ReplaceTokens, tokens: [
+                "project.version"   : project.version,
+                "project.groupId"   : project.group,
+                "project.artifactId": project.name,
+                "env.BUILD_NUMBER"  : (System.getenv('CI') ? System.getenv('BUILD_NUMBER') : 'DEV'),
+                "env.BUILD_TIME"    : System.currentTimeMillis() + ''
+        ]
+    }
+}
+
+static def properReleasesOnly() {
+    return { rules ->
+        rules.all { ComponentSelection selection ->
+            boolean rejected = [
+                    'alpha', 'beta', 'rc', 'm1', 'm2', 'm3', 'm4', 'm5', 'm6', 'preview',
+            ].any {
+                q -> selection.candidate.version.toLowerCase().contains(q)
+            }
+            if (rejected) {
+                selection.reject('Not a release')
+            }
+        }
+    }
+}
